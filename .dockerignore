@@ -1,0 +1,10 @@
+.git
+.gitignore
+.github
+build/
+*.zip
+*.tar.gz
+Dockerfile
+.dockerignore
+README.md
+LICENSE
