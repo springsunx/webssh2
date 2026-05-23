@@ -100,6 +100,12 @@ func main() {
 		file.GET("/progress", func(c *gin.Context) {
 			controller.UploadProgressWs(c)
 		})
+		file.GET("/read", func(c *gin.Context) {
+			c.JSON(200, controller.ReadFile(c))
+		})
+		file.POST("/save", func(c *gin.Context) {
+			c.JSON(200, controller.SaveFile(c))
+		})
 	}
 
 	// --- Static Files & SPA Frontend ---

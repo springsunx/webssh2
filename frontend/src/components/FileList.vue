@@ -25,7 +25,7 @@
             </el-upload>
         </el-dialog>
         
-        <el-table :data="fileList" class="file-table" @row-click="rowClick" height="100%">
+        <el-table :data="fileList" class="file-table" @row-click="rowClick" @row-contextmenu="handleContextMenu" height="100%">
             <el-table-column
                 :label="$t('Name')"
                 width="140"
@@ -38,11 +38,31 @@
             <el-table-column :label="$t('Size')" prop="Size" width="80"></el-table-column>
             <el-table-column :label="$t('ModifiedTime')" prop="ModifyTime" width="120" sortable></el-table-column>
         </el-table>
+        <!-- 右键菜单 -->
+        <div v-show="contextMenuVisible" class="context-menu" :style="{top: contextMenuTop + 'px', left: contextMenuLeft + 'px'}">
+            <div class="context-menu-item" @click="openEditor" v-if="selectedRow && !selectedRow.IsDir && isTextFile(selectedRow.Name)">
+                <i class="el-icon-edit"></i> 编辑
+            </div>
+            <div class="context-menu-item" @click="downloadSelectedFile">
+                <i class="el-icon-download"></i> 下载
+            </div>
+            <div class="context-menu-item" @click="closeContextMenu">
+                <i class="el-icon-close"></i> 取消
+            </div>
+        </div>
+        <!-- 编辑对话框 -->
+        <el-dialog :title="'编辑文件: ' + editFilePath" :visible.sync="editDialogVisible" width="70%" append-to-body>
+            <el-input type="textarea" v-model="editFileContent" :rows="20" placeholder="文件内容"></el-input>
+            <span slot="footer" class="dialog-footer">
+                <el-button @click="editDialogVisible = false">取 消</el-button>
+                <el-button type="primary" @click="saveFileContent">保 存</el-button>
+            </span>
+        </el-dialog>
     </div>
 </template>
 
 <script>
-import { fileList } from '@/api/file'
+import { fileList, readFile, saveFile } from '@/api/file'
 import { mapState } from 'vuex'
 
 export default {
@@ -58,7 +78,14 @@ export default {
             uploadTip: '',
             progressPercent: 0,
             initialRedirectDone: false,
-            homePath: ''
+            homePath: '',
+            contextMenuVisible: false,
+            contextMenuTop: 0,
+            contextMenuLeft: 0,
+            selectedRow: null,
+            editDialogVisible: false,
+            editFileContent: '',
+            editFilePath: ''
         }
     },
     mounted() {
@@ -66,6 +93,10 @@ export default {
         if (!this.currentPath || this.currentPath === '/') {
             this.getFileList()
         }
+    },
+    beforeDestroy() {
+        // 移除事件监听器
+        document.removeEventListener('click', this.closeContextMenu)
     },
     computed: {
         ...mapState(['currentTab']), // currentTab may be deprecated but keeping for now
@@ -224,6 +255,74 @@ export default {
             const prefix = process.env.NODE_ENV === 'production' ? `${location.origin}` : 'api'
             const downloadUrl = `${prefix}/file/download?path=${this.downloadFilePath}&sshInfo=${this.$store.getters.sshReq}`
             window.open(downloadUrl)
+        },
+        handleContextMenu(row, column, event) {
+            // 阻止默认右键菜单
+            event.preventDefault()
+            // 设置选中行
+            this.selectedRow = row
+            // 设置菜单位置
+            this.contextMenuTop = event.clientY
+            this.contextMenuLeft = event.clientX
+            // 显示菜单
+            this.contextMenuVisible = true
+            // 点击其他地方关闭菜单
+            document.addEventListener('click', this.closeContextMenu)
+        },
+        closeContextMenu() {
+            this.contextMenuVisible = false
+            document.removeEventListener('click', this.closeContextMenu)
+        },
+        isTextFile(filename) {
+            // 常见文本文件扩展名
+            const textExtensions = [
+                '.txt', '.go', '.js', '.ts', '.jsx', '.tsx', '.py', '.rb', '.php', '.java', '.c', '.cpp', '.h', '.hpp',
+                '.cs', '.swift', '.kt', '.rs', '.r', '.m', '.mm', '.pl', '.pm', '.sh', '.bash', '.zsh', '.fish',
+                '.bat', '.cmd', '.ps1', '.vbs', '.lua', '.groovy', '.scala', '.clj', '.cljs', '.cljc', '.edn',
+                '.json', '.json5', '.jsonc', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf', '.config',
+                '.xml', '.html', '.htm', '.xhtml', '.svg', '.css', '.scss', '.sass', '.less', '.styl',
+                '.md', '.markdown', '.rst', '.txt', '.log', '.csv', '.tsv', '.sql', '.graphql', '.gql',
+                '.dockerfile', '.dockerignore', '.gitignore', '.env', '.editorconfig', '.eslintrc', '.prettierrc',
+                '.babelrc', '.stylelintrc', '.huskyrc', '.lintstagedrc', '.npmrc', '.yarnrc', '.nvmrc',
+                '.vue', '.svelte', '.astro', '.ejs', '.hbs', '.handlebars', '.pug', '.jade',
+                '.proto', '.thrift', '.avsc', '.avdl', '.gql', '.graphql'
+            ]
+            const ext = '.' + filename.split('.').pop().toLowerCase()
+            return textExtensions.includes(ext) || filename.startsWith('.')
+        },
+        async openEditor() {
+            this.closeContextMenu()
+            const filePath = this.currentPath.endsWith('/') ? this.currentPath + this.selectedRow.Name : this.currentPath + '/' + this.selectedRow.Name
+            try {
+                const result = await readFile(filePath, this.$store.getters.sshReq)
+                if (result.Msg === 'success') {
+                    this.editFilePath = filePath
+                    this.editFileContent = result.Data.content
+                    this.editDialogVisible = true
+                } else {
+                    this.$message.error(result.Msg)
+                }
+            } catch (error) {
+                this.$message.error('读取文件失败: ' + error.message)
+            }
+        },
+        async saveFileContent() {
+            try {
+                const result = await saveFile(this.editFilePath, this.editFileContent, this.$store.getters.sshReq)
+                if (result.Msg === 'success') {
+                    this.$message.success('文件保存成功')
+                    this.editDialogVisible = false
+                } else {
+                    this.$message.error(result.Msg)
+                }
+            } catch (error) {
+                this.$message.error('保存文件失败: ' + error.message)
+            }
+        },
+        downloadSelectedFile() {
+            this.closeContextMenu()
+            this.downloadFilePath = this.currentPath.endsWith('/') ? this.currentPath + this.selectedRow.Name : this.currentPath + '/' + this.selectedRow.Name
+            this.downloadFile()
         }
     }
 }
@@ -294,6 +393,28 @@ export default {
             align-items: center;
         }
         /* --- End Customization --- */
+    }
+}
+.context-menu {
+    position: fixed;
+    z-index: 3000;
+    background: #fff;
+    border: 1px solid #e4e7ed;
+    border-radius: 4px;
+    box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.1);
+    padding: 6px 0;
+    .context-menu-item {
+        padding: 8px 16px;
+        cursor: pointer;
+        font-size: 14px;
+        color: #606266;
+        &:hover {
+            background-color: #ecf5ff;
+            color: #409eff;
+        }
+        i {
+            margin-right: 8px;
+        }
     }
 }
 .uploadContainer {

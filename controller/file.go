@@ -1,9 +1,12 @@
 package controller
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -308,4 +311,170 @@ func detectHomeDir(sftpClient *sftp.Client, username string) string {
 
 	// 4. 如果都失败了，返回根目录
 	return "/home"
+}
+
+// isTextFile 根据文件扩展名判断是否为文本文件
+func isTextFile(filename string) bool {
+	// 常见文本文件扩展名
+	textExtensions := []string{
+		".txt", ".go", ".js", ".ts", ".jsx", ".tsx", ".py", ".rb", ".php", ".java", ".c", ".cpp", ".h", ".hpp",
+		".cs", ".swift", ".kt", ".rs", ".r", ".m", ".mm", ".pl", ".pm", ".sh", ".bash", ".zsh", ".fish",
+		".bat", ".cmd", ".ps1", ".vbs", ".lua", ".groovy", ".scala", ".clj", ".cljs", ".cljc", ".edn",
+		".json", ".json5", ".jsonc", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".config",
+		".xml", ".html", ".htm", ".xhtml", ".svg", ".css", ".scss", ".sass", ".less", ".styl",
+		".md", ".markdown", ".rst", ".txt", ".log", ".csv", ".tsv", ".sql", ".graphql", ".gql",
+		".dockerfile", ".dockerignore", ".gitignore", ".env", ".editorconfig", ".eslintrc", ".prettierrc",
+		".babelrc", ".stylelintrc", ".huskyrc", ".lintstagedrc", ".npmrc", ".yarnrc", ".nvmrc",
+		".vue", ".svelte", ".astro", ".ejs", ".hbs", ".handlebars", ".pug", ".jade",
+		".proto", ".thrift", ".avsc", ".avdl", ".gql", ".graphql",
+	}
+	ext := strings.ToLower(filepath.Ext(filename))
+	for _, textExt := range textExtensions {
+		if ext == textExt {
+			return true
+		}
+	}
+	// 如果没有扩展名，检查文件名是否以点开头（如 .gitignore）
+	if strings.HasPrefix(filename, ".") && ext == "" {
+		return true
+	}
+	return false
+}
+
+// ReadFile 读取文本文件内容
+func ReadFile(c *gin.Context) *ResponseBody {
+	responseBody := ResponseBody{Msg: "success"}
+	defer TimeCost(time.Now(), &responseBody)
+	path := strings.TrimSpace(c.DefaultQuery("path", ""))
+	if path == "" {
+		responseBody.Msg = "文件路径不能为空"
+		return &responseBody
+	}
+	sshInfo := c.DefaultQuery("sshInfo", "")
+	sshClient, err := core.DecodedMsgToSSHClient(sshInfo)
+	if err != nil {
+		fmt.Println(err)
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	if err := sshClient.CreateSftp(); err != nil {
+		fmt.Println(err)
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	defer sshClient.Close()
+
+	// 检查文件是否存在
+	fileInfo, err := sshClient.Sftp.Stat(path)
+	if err != nil {
+		responseBody.Msg = "文件不存在或无法访问: " + err.Error()
+		return &responseBody
+	}
+	// 检查是否为目录
+	if fileInfo.IsDir() {
+		responseBody.Msg = "不能编辑目录"
+		return &responseBody
+	}
+	// 检查文件大小（限制为1MB）
+	if fileInfo.Size() > 1*1024*1024 {
+		responseBody.Msg = "文件过大，只能编辑小于1MB的文件"
+		return &responseBody
+	}
+	// 检查是否为文本文件
+	if !isTextFile(fileInfo.Name()) {
+		responseBody.Msg = "不支持编辑此文件类型"
+		return &responseBody
+	}
+
+	// 打开文件
+	sftpFile, err := sshClient.Sftp.Open(path)
+	if err != nil {
+		responseBody.Msg = "无法打开文件: " + err.Error()
+		return &responseBody
+	}
+	defer sftpFile.Close()
+
+	// 读取文件内容
+	content, err := io.ReadAll(sftpFile)
+	if err != nil {
+		responseBody.Msg = "读取文件失败: " + err.Error()
+		return &responseBody
+	}
+
+	// 检查是否为二进制文件（包含空字节）
+	if bytes.Contains(content, []byte{0}) {
+		responseBody.Msg = "不能编辑二进制文件"
+		return &responseBody
+	}
+
+	responseBody.Data = gin.H{
+		"content": string(content),
+		"path":    path,
+	}
+	return &responseBody
+}
+
+// SaveFile 保存文本文件内容
+func SaveFile(c *gin.Context) *ResponseBody {
+	responseBody := ResponseBody{Msg: "success"}
+	defer TimeCost(time.Now(), &responseBody)
+	var requestData struct {
+		SSHInfo string `json:"sshInfo"`
+		Path    string `json:"path"`
+		Content string `json:"content"`
+	}
+	if err := c.ShouldBindJSON(&requestData); err != nil {
+		responseBody.Msg = "请求参数错误: " + err.Error()
+		return &responseBody
+	}
+	if requestData.Path == "" {
+		responseBody.Msg = "文件路径不能为空"
+		return &responseBody
+	}
+	sshClient, err := core.DecodedMsgToSSHClient(requestData.SSHInfo)
+	if err != nil {
+		fmt.Println(err)
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	if err := sshClient.CreateSftp(); err != nil {
+		fmt.Println(err)
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	defer sshClient.Close()
+
+	// 检查文件是否存在
+	fileInfo, err := sshClient.Sftp.Stat(requestData.Path)
+	if err != nil {
+		responseBody.Msg = "文件不存在或无法访问: " + err.Error()
+		return &responseBody
+	}
+	// 检查是否为目录
+	if fileInfo.IsDir() {
+		responseBody.Msg = "不能保存到目录"
+		return &responseBody
+	}
+	// 检查是否为文本文件
+	if !isTextFile(fileInfo.Name()) {
+		responseBody.Msg = "不支持编辑此文件类型"
+		return &responseBody
+	}
+
+	// 打开文件进行写入（截断模式）
+	sftpFile, err := sshClient.Sftp.OpenFile(requestData.Path, os.O_WRONLY|os.O_TRUNC|os.O_CREATE)
+	if err != nil {
+		responseBody.Msg = "无法打开文件进行写入: " + err.Error()
+		return &responseBody
+	}
+	defer sftpFile.Close()
+
+	// 写入内容
+	_, err = sftpFile.Write([]byte(requestData.Content))
+	if err != nil {
+		responseBody.Msg = "写入文件失败: " + err.Error()
+		return &responseBody
+	}
+
+	return &responseBody
 }
